@@ -1,84 +1,76 @@
-# Stock Analyst AI Agent
+# 📊 Stock Analyst AI Agent
 
-A single-file Streamlit app over a LangGraph agent that analyses US-listed
-companies using live financial data plus an OLS regression model from a
-2011-2013 capstone study.
+> Teaching machines to read stocks so I don't have to read the news.
 
-Everything - the five tools, the regression coefficients, the agent, the CSS,
-and the chat UI - lives in [app.py](app.py). The only things outside it are
-credentials (`.streamlit/secrets.toml`, gitignored) and `index_paper.py`, a
-one-off script for re-indexing the research paper.
+**🔗 Live app: [stock-analyst-aiagent.streamlit.app](https://stock-analyst-aiagent.streamlit.app/)** — no login, no signup, just ask it about a company.
 
-## Running locally
+---
 
-```bash
-pip install -r requirements.txt
-cp .streamlit/secrets.toml.example .streamlit/secrets.toml   # then fill it in
-streamlit run app.py
+## What this actually does
+
+You ask a plain-English question about a public company. Behind the scenes, a [LangGraph](https://github.com/langchain-ai/langgraph) agent decides — on its own, per question — which of five tools it needs: pull real financial statements, check a live quote, search recent news, consult my own capstone research, or run my regression model. It stitches the results into one answer, in the time it'd take you to open four browser tabs and still not read any of them.
+
+It will not tell you to buy or sell anything. It has strong opinions about debt ratios; it has no opinions about your portfolio.
+
+## Why it exists
+
+I ran an OLS regression for my BUSA521 capstone — 279 firm-year observations, 182 U.S. public companies, predicting next-year ROA from seven financial ratios. A fitted model sitting in a `.csv` is not a very interesting thing to show anyone. An agent that applies that same model to whatever company you're actually curious about *today*, while being upfront about exactly how far outside its training data that company sits, is a much better demo of the same statistics.
+
+## How it's built
+
 ```
-
-Opens at http://localhost:8501. `streamlit run` only serves the app while
-that terminal stays open - closing it, or pressing Ctrl+C, stops the server
-and the URL stops responding.
-
-**No password by default** - anyone with the link can use the app and spend
-your Gemini/Finnhub free-tier quota. To gate it, uncomment `APP_PASSWORD` in
-`.streamlit/secrets.toml` and add back a password check at the top of
-`main()` in `app.py` (removed intentionally; ask if you want it restored).
-
-## Deploying (free, shareable link)
-
-1. Push this folder to a **private** GitHub repo.
-   `.streamlit/secrets.toml` and `.env` are gitignored - confirm they are not in
-   the commit before pushing.
-2. Go to https://share.streamlit.io → **New app** → pick the repo → main file `app.py`.
-3. Open **Advanced settings → Secrets** and paste the contents of your local
-   `secrets.toml`.
-4. Deploy. You get a `*.streamlit.app` URL that stays up independent of your
-   laptop.
-
-## The tools
+your question
+     │
+     ▼
+ LangGraph agent (Gemini) ── decides which tools it needs, if any
+     │
+     ├── get_company_financials  → Yahoo Finance statements, live
+     ├── predict_roa              → my capstone's fitted OLS coefficients
+     ├── search_recent_news       → DuckDuckGo
+     ├── search_my_research       → capstone paper, embedded in MongoDB Atlas
+     └── get_market_snapshot      → Finnhub: quote, analyst trends, headlines
+     │
+     ▼
+ one grounded answer + a live TradingView chart for whatever you asked about
+```
 
 | Tool | Source | Needs |
 |---|---|---|
-| `get_company_financials` | Yahoo Finance statements | - |
-| `predict_roa` | Regression coefficients (inlined in `app.py`) | - |
-| `search_recent_news` | DuckDuckGo | - |
-| `search_my_research` | Capstone paper in Atlas | `MONGODB_URI` |
-| `get_market_snapshot` | Finnhub live quotes/news | `FINNHUB_API_KEY` |
+| `get_company_financials` | Yahoo Finance | – |
+| `predict_roa` | My fitted regression (inlined, no external file) | – |
+| `search_recent_news` | DuckDuckGo | – |
+| `search_my_research` | Capstone paper, vector-indexed in Atlas | `MONGODB_URI` |
+| `get_market_snapshot` | Finnhub live quotes + news | `FINNHUB_API_KEY` |
 
-Tools whose credential is absent are dropped from the agent at startup; the
-agent is told to say so rather than answer from memory.
+Whichever tool is missing its credential just quietly drops out of the toolset — the agent is told to say so rather than improvise a number.
 
-## Model fallback
+## Engineering details worth mentioning
 
-Google's free tier regularly puts one Gemini alias under heavy load (slow or
-outright `503`) while a sibling responds normally. Each question tries, in
-order: `gemini-flash-lite-latest` → `gemini-flash-latest` →
-`gemini-3.5-flash-lite`. A stuck model is abandoned after ~15s, not minutes,
-and the status panel shows a note when a fallback kicks in. If all three fail
-- a real, if uncommon, possibility during a widespread outage - the app
-reports which models it tried and the last error, rather than hanging.
+- **It doesn't panic when Google does.** Free-tier Gemini occasionally puts one model alias under heavy load while its siblings answer fine. Every question tries `gemini-flash-lite-latest` → `gemini-flash-latest` → `gemini-3.5-flash-lite` in order, abandoning a stuck model after ~15 seconds instead of hanging for minutes. If all three are down at once, it says so plainly instead of pretending everything's fine.
+- **It knows when its own model doesn't apply.** The regression was fitted on companies where "large" tops out around $392M in assets. Ask it about a mega-cap and it flags the estimate as a serious extrapolation rather than quietly handing you a confident-sounding number.
+- **The chart actually matches the stock.** A live TradingView chart renders under each answer — exchange-qualified (`NASDAQ:ARM`, not just `ARM`), because a bare ticker can resolve to the wrong instrument entirely, and I found that out the hard way.
+- **It's one file.** Every tool, the regression coefficients, the agent, the styling, and the chat UI live in [`app.py`](app.py) — nothing to go hunting through five modules to understand.
 
-## Re-indexing the paper
+## Stack
 
-Only needed if the .docx changes. Requires the paper and a `.env` in the folder:
+`LangGraph` · `LangChain` · `Google Gemini` (flash-lite, with fallback) · `MongoDB Atlas` (vector search) · `yfinance` · `Finnhub` · `DuckDuckGo` · `Streamlit` · `TradingView` embed
+
+## Running it yourself
 
 ```bash
-python index_paper.py
+pip install -r requirements.txt
+cp .streamlit/secrets.toml.example .streamlit/secrets.toml   # add your own keys
+streamlit run app.py
 ```
 
-This re-chunks, re-embeds, and rebuilds the Atlas vector index. The deployed app
-never runs it - it reads chunks already in Atlas, so the paper itself is never
-uploaded to the host.
+Opens at `http://localhost:8501`. Only `GOOGLE_API_KEY` is required — the Atlas and Finnhub tools are optional and the app runs fine without them, just with a smaller toolset.
 
-## Notes
+There's also a [notebook](stock_analyst_agent.ipynb) with the same agent broken into cells, for poking at individual tools without the UI in the way.
 
-- **Model quota.** `gemini-flash-lite-latest` is the default because its free-tier
-  bucket is separate from `gemini-flash-latest` (20 requests/day). One question
-  costs one request per agent step, so a 3-tool answer costs ~4 - across
-  whichever model in the fallback chain ends up answering.
-- **Latency.** 15-45s per question is normal; the status panel shows which tool
-  is running, and which model if a fallback happened.
-- **Not investment advice.** The agent is instructed never to recommend buying or
-  selling, and to label regression output as an illustrative estimate.
+## The fine print
+
+Every number in an answer comes from a live tool call, never from the model's own memory. Every regression output is labeled as an illustrative estimate from a 2011–2013 pattern, not a forecast. It will describe a company's financial health from five different angles and then, deliberately, decline to have an opinion about whether you should buy it.
+
+---
+
+Built by **Samiha Tanjeem**
