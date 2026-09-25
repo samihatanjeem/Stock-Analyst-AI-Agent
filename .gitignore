@@ -1,0 +1,11 @@
+.streamlit/secrets.toml
+.env
+__pycache__/
+*.pyc
+*.docx
+API key notes.txt
+
+# Local tooling symlinks (Streamlit's own dev-agent skills) - machine-specific,
+# not part of the app.
+.agents/
+.claude/
