@@ -10,8 +10,10 @@ Run:      streamlit run app.py
 Re-index: python index_paper.py   (only needed if the paper's content changes)
 """
 
+import html
 import json
 import os
+import re
 import uuid
 from datetime import date, timedelta
 
@@ -538,6 +540,54 @@ def _as_text(message) -> str:
     ).strip()
 
 
+def _parse_financials_metrics(tool_output: str) -> dict | None:
+    """Pull the two JSON blocks and total assets back out of
+    get_company_financials's text output, for rendering as stat tiles instead
+    of leaving them buried in prose. Returns None if the text doesn't match
+    the expected shape (e.g. the tool's own "Could not retrieve..." error
+    branch, or a ticker that failed) - tiles are just skipped, never a crash.
+    The two dicts are always flat (no nested objects), so a non-greedy match
+    up to the first "\\n}" is safe - there's only ever one closing brace.
+    """
+    try:
+        reg_match = re.search(
+            r"Regression-input ratios \(for predict_roa\):\n(\{.*?\n\})\n\n",
+            tool_output, re.DOTALL,
+        )
+        add_match = re.search(
+            r"Additional financial health indicators \(broader context\):\n(\{.*?\n\})\n\n",
+            tool_output, re.DOTALL,
+        )
+        assets_match = re.search(r"Total assets: \$([\d,]+)", tool_output)
+        if not (reg_match and add_match and assets_match):
+            return None
+        return {
+            "regression": json.loads(reg_match.group(1)),
+            "additional": json.loads(add_match.group(1)),
+            "total_assets": float(assets_match.group(1).replace(",", "")),
+        }
+    except Exception:
+        return None
+
+
+def _chunk_text(message_chunk) -> str:
+    """Same content-list flattening as _as_text(), but for a single streaming
+    chunk rather than a complete message - deliberately no .strip(). A chunk
+    that's purely whitespace (a legitimate token boundary - e.g. the space
+    between two words landing in its own chunk) is meaningful and must survive
+    concatenation; _as_text()'s strip() would silently swallow it, which is
+    exactly what glued words together ("Based onNVIDIA's") before this existed.
+    """
+    content = message_chunk.content
+    if isinstance(content, str):
+        return content
+    return "".join(
+        block.get("text", "")
+        for block in content
+        if isinstance(block, dict) and block.get("type") == "text"
+    )
+
+
 class QuotaExhausted(RuntimeError):
     """Raised when every model in FALLBACK_MODELS failed - out of quota, timed
     out, or otherwise unreachable. The underlying cause is reported in the
@@ -545,7 +595,9 @@ class QuotaExhausted(RuntimeError):
 
 
 def stream_answer(agents: dict, question: str, history=None):
-    """Run the agent, yielding ('model', name), ('tool', (name, args)), and ('final', text).
+    """Run the agent, yielding ('model', name), ('tool', (name, args)),
+    ('metrics', dict) when get_company_financials returns, ('chunk',
+    text-piece), and ('final', text).
 
     `agents` is the {model_name: agent} dict from build_agent(). Google's free
     tier regularly has one model alias slow or 503 while a sibling answers
@@ -558,6 +610,14 @@ def stream_answer(agents: dict, question: str, history=None):
     one - Google's free tier fails in too many shapes (GoogleAPIError with
     503/504 text, a bare requests.ReadTimeout with no such text, a connection
     error) to whitelist safely, and every case here means the same thing.
+
+    Tool detection still runs entirely off stream_mode "updates" - unchanged
+    from before, since it's already proven reliable. "messages" is added
+    alongside purely to get token-level text chunks for a live typing effect;
+    it's never used for tool-call detection, and only chunks from the "model"
+    node are surfaced - a ToolMessage's raw output would otherwise show up
+    here too (it has a plain-string .content the same shape _as_text expects),
+    which would leak unparsed tool JSON into the visible answer.
     """
     messages = list(history or []) + [HumanMessage(content=question)]
     last_error = None
@@ -566,14 +626,31 @@ def stream_answer(agents: dict, question: str, history=None):
         yield "model", model
         try:
             final_text = ""
-            for update in agent.stream({"messages": messages}, stream_mode="updates"):
-                for node_output in update.values():
-                    for msg in node_output.get("messages", []) or []:
-                        for call in getattr(msg, "tool_calls", []) or []:
-                            yield "tool", (call["name"], call.get("args") or {})
-                        text = _as_text(msg)
-                        if text and getattr(msg, "type", "") == "ai":
-                            final_text = text
+            for mode, payload in agent.stream(
+                {"messages": messages}, stream_mode=["updates", "messages"]
+            ):
+                if mode == "updates":
+                    for node_output in payload.values():
+                        for msg in node_output.get("messages", []) or []:
+                            for call in getattr(msg, "tool_calls", []) or []:
+                                yield "tool", (call["name"], call.get("args") or {})
+                            if (
+                                getattr(msg, "type", "") == "tool"
+                                and getattr(msg, "name", "") == "get_company_financials"
+                            ):
+                                metrics = _parse_financials_metrics(_as_text(msg))
+                                if metrics:
+                                    yield "metrics", metrics
+                            text = _as_text(msg)
+                            if text and getattr(msg, "type", "") == "ai":
+                                final_text = text
+                elif mode == "messages":
+                    msg_chunk, metadata = payload
+                    if metadata.get("langgraph_node") != "model":
+                        continue  # skip ToolMessage chunks - not answer text
+                    piece = _chunk_text(msg_chunk)
+                    if piece:
+                        yield "chunk", piece
             yield "final", final_text
             return
         except Exception as e:
@@ -813,6 +890,61 @@ div[data-testid="stButton"] > button:hover {
     border-left: 2px solid var(--line);
     padding-left: 0.7rem;
 }
+
+/* ---------------------------------------------------------------- chart card */
+/* Keys are unique per chart (e.g. "chart-<uuid>"), so this matches all of
+   them via a substring selector rather than one rule per key. */
+div[class*="st-key-chart-"] {
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    overflow: hidden;
+    box-shadow: 0 1px 2px rgba(16,32,32,0.04);
+    margin-top: 0.5rem;
+}
+
+/* -------------------------------------------------------------- metric tiles */
+div[class*="st-key-metrics-"] {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    padding: 0.9rem 1rem 0.3rem;
+    margin-bottom: 0.9rem;
+}
+/* st.metric's own testids - best-effort refinement. The card styling above
+   is the guaranteed baseline; these just tint it to match the brand if the
+   testids match (harmless no-op otherwise). */
+div[class*="st-key-metrics-"] [data-testid="stMetric"] {
+    background: var(--accent-dim);
+    border-radius: 10px;
+    padding: 0.6rem 0.8rem;
+}
+div[class*="st-key-metrics-"] [data-testid="stMetricLabel"] {
+    font-size: 0.72rem;
+    color: var(--ink-soft);
+}
+div[class*="st-key-metrics-"] [data-testid="stMetricValue"] {
+    font-size: 1.25rem;
+    color: var(--ink);
+}
+
+/* -------------------------------------------------------------------- alerts */
+.alert-card {
+    border-radius: 12px;
+    padding: 0.9rem 1.1rem;
+    font-size: 0.88rem;
+    line-height: 1.55;
+    margin: 0.6rem 0;
+}
+.alert-card.warn {
+    background: #FFF6E9;
+    border: 1px solid #F2D9A8;
+    color: #6B4E14;
+}
+.alert-card.error {
+    background: #FDECEC;
+    border: 1px solid #F3B9B9;
+    color: #7A1F1F;
+}
 </style>
 """
 
@@ -842,6 +974,50 @@ def _pills_html(names: list[str], labels: dict) -> str:
 
 def _source_row_html(name: str, detail: str) -> str:
     return f'<div class="source-row"><span>{name}</span><span>{detail}</span></div>'
+
+
+def _alert_html(kind: str, message: str) -> str:
+    """A warning/error card matching the app's own design language, in place
+    of Streamlit's generic yellow/red alert boxes. kind is 'warn' or 'error'."""
+    icon = "⚠" if kind == "warn" else "✕"
+    return f'<div class="alert-card {kind}">{icon} {message}</div>'
+
+
+def _render_metric_tiles(metrics: dict, key: str) -> None:
+    """Render get_company_financials's numbers as a stat-tile row instead of
+    leaving them buried in prose - the closest thing to a real analyst
+    dashboard this app has. A bare stat tile (label + value, no chart) needs
+    no color-palette or hover treatment; delta/trend are both optional per
+    the tile spec and skipped here, since these are point-in-time ratios with
+    no clean "vs last period" pairing to show alongside them.
+
+    `key` must be unique per call (Streamlit requires unique container keys
+    app-wide) - callers pass something derived from the ticker plus the
+    message's position, since the same ticker can recur across a conversation.
+    """
+    reg = metrics["regression"]
+    add = metrics["additional"]
+
+    def pct(value):
+        return f"{value * 100:.1f}%" if value is not None else "—"
+
+    def ratio(value):
+        return f"{value:.2f}x" if value is not None else "—"
+
+    tiles = [
+        ("Return on assets", pct(reg.get("current_roa"))),
+        ("Profit margin", pct(reg.get("profit_margin"))),
+        ("Debt ratio", pct(reg.get("debt_ratio"))),
+        ("Current ratio", ratio(add.get("current_ratio"))),
+        ("Revenue growth", pct(add.get("revenue_growth"))),
+        ("Gross margin", pct(add.get("gross_margin"))),
+    ]
+    with st.container(key=key):
+        for row in (tiles[:3], tiles[3:]):
+            cols = st.columns(3)
+            for col, (label, value) in zip(cols, row):
+                with col:
+                    st.metric(label, value)
 
 
 # Yahoo Finance's exchange codes (from yf.Ticker(...).fast_info["exchange"]),
@@ -1000,17 +1176,22 @@ def main() -> None:
                     st.session_state["pending"] = text
                     st.rerun()
 
-    for message in st.session_state["messages"]:
+    for i, message in enumerate(st.session_state["messages"]):
         # Derived from the role, never read back from the stored message - a
         # session from before an avatar change would otherwise replay a stale value.
         avatar = avatar_user if message["role"] == "user" else avatar_ai
         with st.chat_message(message["role"], avatar=avatar):
+            # Tiles above the narrative, matching the live-turn order - i makes
+            # each replayed message's container keys unique across the app run.
+            if message.get("metrics"):
+                _render_metric_tiles(message["metrics"], key=f"metrics-hist-{i}")
             st.markdown(message["content"])
             if message.get("tools"):
                 st.markdown(_pills_html(message["tools"], TOOL_LABELS), unsafe_allow_html=True)
             if message.get("ticker"):
                 st.caption(f"Live chart — {message['ticker'].split(':')[-1]}")
-                st.iframe(_tradingview_widget_html(message["ticker"]), height=420)
+                with st.container(key=f"chart-hist-{i}"):
+                    st.iframe(_tradingview_widget_html(message["ticker"]), height=420)
 
     question = st.chat_input("Ask about any US-listed company…") or st.session_state.pop("pending", None)
 
@@ -1021,12 +1202,22 @@ def main() -> None:
 
         with st.chat_message("assistant", avatar=avatar_ai):
             status = st.status("Reading the question…", expanded=True)
+            # Reserved in this order so metric tiles land ABOVE the streaming
+            # text regardless of when mid-stream the tool result actually
+            # arrives - st.empty() claims its visual position immediately,
+            # before either slot has anything to show yet.
+            metrics_slot = st.empty()
+            answer_slot = st.empty()  # live-updated as text streams in below
             used: list[str] = []
             tried_models: list[str] = []
             answer = ""
-            # First ticker looked up via a company-specific tool this turn - used
-            # to sync the sidebar chart to whatever was actually discussed.
+            streamed = ""  # accumulates chunk-by-chunk for the typing effect
+            # First ticker/metrics looked up via a company-specific tool this
+            # turn - only the first, same simplification as the chart: a
+            # comparison question calls get_company_financials twice, and one
+            # tile row is shown, not two.
             queried_ticker = None
+            queried_metrics = None
 
             try:
                 for kind, payload in stream_answer(agents, question):
@@ -1036,6 +1227,11 @@ def main() -> None:
                             status.write(
                                 f"⚠ {tried_models[-2]} was slow or unavailable — trying {payload}"
                             )
+                            # A prior model may have streamed partial text before
+                            # failing - clear it so its leftover fragment doesn't
+                            # run together with the next model's fresh attempt.
+                            streamed = ""
+                            answer_slot.empty()
                         status.update(label=f"Thinking ({payload})…")
                     elif kind == "tool":
                         name, args = payload
@@ -1053,30 +1249,56 @@ def main() -> None:
                         label = TOOL_LABELS.get(name, name)
                         status.write(f"→ {label}")
                         status.update(label=label)
+                    elif kind == "metrics":
+                        if queried_metrics is None:
+                            queried_metrics = payload
+                            with metrics_slot.container():
+                                _render_metric_tiles(
+                                    queried_metrics, key=f"metrics-{uuid.uuid4().hex[:8]}"
+                                )
+                    elif kind == "chunk":
+                        streamed += payload
+                        answer_slot.markdown(streamed + "▌")
                     elif kind == "final":
+                        # Ground truth from the "updates" stream, not the
+                        # accumulated chunks - shown as the last, cursor-free
+                        # update so the two can never visibly disagree.
                         answer = payload
+                        answer_slot.markdown(answer)
 
                 status.update(
                     label=f"Analysis complete · {len(used)} source(s)",
                     state="complete",
                     expanded=False,
                 )
-                st.markdown(answer)
                 if used:
                     st.markdown(_pills_html(used, TOOL_LABELS), unsafe_allow_html=True)
                 if queried_ticker:
                     st.caption(f"Live chart — {queried_ticker.split(':')[-1]}")
-                    st.iframe(_tradingview_widget_html(queried_ticker), height=420)
+                    with st.container(key=f"chart-{uuid.uuid4().hex[:8]}"):
+                        st.iframe(_tradingview_widget_html(queried_ticker), height=420)
                 st.session_state["messages"].append(
-                    {"role": "assistant", "content": answer, "tools": used, "ticker": queried_ticker}
+                    {
+                        "role": "assistant", "content": answer, "tools": used,
+                        "ticker": queried_ticker, "metrics": queried_metrics,
+                    }
                 )
 
             except QuotaExhausted as e:
                 status.update(label="No model responded", state="error", expanded=False)
-                st.warning(str(e))
+                # Escaped before it ever reaches the template - this message can
+                # embed arbitrary API error text, and unsafe_allow_html means an
+                # unescaped '<' could inject markup, unlike st.warning's plain text.
+                st.markdown(_alert_html("warn", html.escape(str(e))), unsafe_allow_html=True)
             except Exception as e:
                 status.update(label="Something went wrong", state="error", expanded=False)
-                st.error(f"{type(e).__name__}: {e}")
+                st.markdown(
+                    _alert_html(
+                        "error",
+                        f"<b>{html.escape(type(e).__name__)}:</b> {html.escape(str(e))}",
+                    ),
+                    unsafe_allow_html=True,
+                )
 
     # -- Sidebar ----------------------------------------------------------
     sources = [
