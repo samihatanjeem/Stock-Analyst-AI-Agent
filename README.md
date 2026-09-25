@@ -1,20 +1,20 @@
 # 📊 Stock Analyst AI Agent
 
-> Teaching machines to read stocks so I don't have to read the news.
+> Teaching machines to read and analyze market stocks so I don't have to!
 
-**🔗 Live app: [stock-analyst-aiagent.streamlit.app](https://stock-analyst-aiagent.streamlit.app/)** — no login, no signup, just ask it about a company.
+**🔗 Live app: [stock-analyst-aiagent.streamlit.app](https://stock-analyst-ai-agent.streamlit.app/)** — no login, no signup, just ask it about any company.
 
 ---
 
 ## What this actually does
 
-You ask a plain-English question about a public company. Behind the scenes, a [LangGraph](https://github.com/langchain-ai/langgraph) agent decides — on its own, per question — which of five tools it needs: pull real financial statements, check a live quote, search recent news, consult my own capstone research, or run my regression model. It stitches the results into one answer, in the time it'd take you to open four browser tabs and still not read any of them.
+You ask a questions about a public US stock company. Behind the scenes, a [LangGraph](https://github.com/langchain-ai/langgraph) agent decides — on its own, per question — which of five tools it needs: pull real financial statements, check a live quote, search recent news, consult my own capstone research, or run my regression model. It stitches the results into one answer, in the time it'd take you to open four browser tabs and still not read any of them.
 
 It will not tell you to buy or sell anything. It has strong opinions about debt ratios; it has no opinions about your portfolio.
 
 ## Why it exists
 
-I ran an OLS regression for my BUSA521 capstone — 279 firm-year observations, 182 U.S. public companies, predicting next-year ROA from seven financial ratios. A fitted model sitting in a `.csv` is not a very interesting thing to show anyone. An agent that applies that same model to whatever company you're actually curious about *today*, while being upfront about exactly how far outside its training data that company sits, is a much better demo of the same statistics.
+I ran an OLS regression for my BUSA521 Masters Capstone Project with live data from United States Securities and Exchange Commission(SEC) having 279 firm-year observations, 182 U.S. public companies, predicting next-year ROA from seven financial ratios. A fitted model sitting in a `.csv` is not a very interesting thing to show anyone. An agent that applies that same model to whatever company you're actually curious about *today*, while being upfront about exactly how far outside its training data that company sits, is a much better demo of the same statistics.
 
 ## How it's built
 
