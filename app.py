@@ -1115,8 +1115,21 @@ div[class*="st-key-metrics-"] [data-testid="stMetricValue"] {
 """
 
 
+def _flatten_html(s: str) -> str:
+    """Strip per-line leading whitespace from generated HTML before it goes
+    through st.markdown(). CommonMark treats a line indented 4+ spaces as a
+    code block, even mid-way through what looks like a continuous HTML block -
+    a multi-line f-string template pretty-printed in the Python source carries
+    that indentation straight into the browser-facing output. Confirmed
+    failure mode: the first repeated element rendered fine, every one after
+    it showed up as literal escaped text instead of HTML. Every multi-line
+    HTML template in this file must be wrapped in this before being returned.
+    """
+    return "\n".join(line.strip() for line in s.strip().split("\n"))
+
+
 def _masthead_html(model: str, tool_count: int) -> str:
-    return f"""
+    return _flatten_html(f"""
     <div class="masthead">
         <div class="rule"></div>
         <h1>Stock Analyst</h1>
@@ -1128,7 +1141,7 @@ def _masthead_html(model: str, tool_count: int) -> str:
             <span>Yahoo Finance · Finnhub · Atlas</span>
         </div>
     </div>
-    """
+    """)
 
 
 def _pills_html(names: list[str], labels: dict) -> str:
@@ -1229,7 +1242,7 @@ def _indices_strip_html() -> str:
             {_sparkline_svg(s['sparkline'], up)}
         </div>
         """)
-    return f'<div class="indices-strip">{"".join(tiles)}</div>'
+    return _flatten_html(f'<div class="indices-strip">{"".join(tiles)}</div>')
 
 
 def _price_tiles_html(snapshot: dict) -> str:
@@ -1262,7 +1275,7 @@ def _price_tiles_html(snapshot: dict) -> str:
     range_text = f"${lo:,.2f} – ${hi:,.2f}" if lo is not None and hi is not None else "—"
     prev_text = f"${snapshot['previous_close']:,.2f}" if snapshot.get("previous_close") is not None else "—"
 
-    return f"""
+    return _flatten_html(f"""
     <div class="price-card">
         <div class="price-hero">
             <span class="price-hero-value">${price:,.2f}</span>
@@ -1275,7 +1288,7 @@ def _price_tiles_html(snapshot: dict) -> str:
             <div class="price-detail"><span>Previous close</span><b>{prev_text}</b></div>
         </div>
     </div>
-    """
+    """)
 
 
 def _render_metric_tiles(metrics: dict, key: str) -> None:
