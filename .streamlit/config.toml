@@ -5,7 +5,9 @@ backgroundColor = "#FBFBFA"
 secondaryBackgroundColor = "#F1F5F4"
 textColor = "#1C2B2D"
 linkColor = "#0F766E"
-font = "Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
+font = "Nunito:https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800&display=swap"
+headingFont = "Nunito:https://fonts.googleapis.com/css2?family=Nunito:wght@700;800&display=swap"
+headingFontWeights = [800, 800, 700, 700, 700, 700]
 baseRadius = "0.75rem"
 buttonRadius = "0.5rem"
 baseFontSize = 15

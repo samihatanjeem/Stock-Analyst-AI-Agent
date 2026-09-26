@@ -570,6 +570,39 @@ def _parse_financials_metrics(tool_output: str) -> dict | None:
         return None
 
 
+def _parse_market_snapshot(tool_output: str) -> dict | None:
+    """Pull the live quote and company profile back out of
+    get_market_snapshot's text output, for the price tiles. Returns None if
+    there's no usable quote (Finnhub not configured, unknown ticker, API
+    error) - tiles are skipped, never a crash.
+    """
+    def find(pattern):
+        m = re.search(pattern, tool_output)
+        return m.group(1) if m else None
+
+    def to_float(s):
+        try:
+            return float(s) if s and s != "None" else None
+        except ValueError:
+            return None
+
+    price = to_float(find(r"current_price:\s*([\-\d.]+)"))
+    if price is None:
+        return None
+
+    return {
+        "price": price,
+        "change": to_float(find(r"change:\s*([\-\d.]+)")),
+        "change_pct": to_float(find(r"\(([\-\d.]+)%\)")),
+        "day_open": to_float(find(r"day_open:\s*([\-\d.]+)")),
+        "day_high": to_float(find(r"day_high:\s*([\-\d.]+)")),
+        "day_low": to_float(find(r"day_low:\s*([\-\d.]+)")),
+        "previous_close": to_float(find(r"previous_close:\s*([\-\d.]+)")),
+        "name": find(r"name:\s*(.+)"),
+        "market_cap_millions": to_float(find(r"market_cap_usd_millions:\s*([\-\d.]+)")),
+    }
+
+
 def _chunk_text(message_chunk) -> str:
     """Same content-list flattening as _as_text(), but for a single streaming
     chunk rather than a complete message - deliberately no .strip(). A chunk
@@ -596,8 +629,8 @@ class QuotaExhausted(RuntimeError):
 
 def stream_answer(agents: dict, question: str, history=None):
     """Run the agent, yielding ('model', name), ('tool', (name, args)),
-    ('metrics', dict) when get_company_financials returns, ('chunk',
-    text-piece), and ('final', text).
+    ('metrics', dict) when get_company_financials returns, ('snapshot', dict)
+    when get_market_snapshot returns, ('chunk', text-piece), and ('final', text).
 
     `agents` is the {model_name: agent} dict from build_agent(). Google's free
     tier regularly has one model alias slow or 503 while a sibling answers
@@ -634,13 +667,16 @@ def stream_answer(agents: dict, question: str, history=None):
                         for msg in node_output.get("messages", []) or []:
                             for call in getattr(msg, "tool_calls", []) or []:
                                 yield "tool", (call["name"], call.get("args") or {})
-                            if (
-                                getattr(msg, "type", "") == "tool"
-                                and getattr(msg, "name", "") == "get_company_financials"
-                            ):
-                                metrics = _parse_financials_metrics(_as_text(msg))
-                                if metrics:
-                                    yield "metrics", metrics
+                            if getattr(msg, "type", "") == "tool":
+                                tool_name = getattr(msg, "name", "")
+                                if tool_name == "get_company_financials":
+                                    metrics = _parse_financials_metrics(_as_text(msg))
+                                    if metrics:
+                                        yield "metrics", metrics
+                                elif tool_name == "get_market_snapshot":
+                                    snapshot = _parse_market_snapshot(_as_text(msg))
+                                    if snapshot:
+                                        yield "snapshot", snapshot
                             text = _as_text(msg)
                             if text and getattr(msg, "type", "") == "ai":
                                 final_text = text
@@ -721,25 +757,47 @@ def index_paper(path: str = PAPER_PATH) -> str:
 
 PAGE_CSS = """
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Newsreader:opsz,wght@6..72,400;6..72,500&display=swap');
+/* Nunito itself loads via .streamlit/config.toml's [theme] font/headingFont -
+   that's Streamlit's native mechanism and applies to every built-in widget,
+   not just custom HTML here. This file only needs to reference the family
+   name in its own custom classes below. */
 
 :root {
-    --ink:        #1C2B2D;
-    --ink-soft:   #5B6B6D;
-    --ink-faint:  #8A9A9B;
-    --accent:     #0F766E;
-    --accent-dim: #E6F2F0;
-    --line:       #E2E8E7;
-    --surface:    #FFFFFF;
+    --ink:          #1C2B2D;
+    --ink-soft:     #5B6B6D;
+    --ink-faint:    #8A9A9B;
+    --accent:       #0F766E;
+    --accent-dim:   #E6F2F0;
+    --line:         #E2E8E7;
+    --surface:      #FFFFFF;
+    --yellow-dim:   #FEF6DC;
+    --yellow-line:  #F0DFA0;
+    --yellow-ink:   #7A5E15;
+    --up:           #1A7A4C;
+    --up-dim:       #E4F5EC;
+    --down:         #B3261E;
+    --down-dim:     #FCE8E6;
 }
 
+/* Wider than a typical reading column on purpose - this page now carries
+   price tiles and a chart side by side with prose, and 48rem left the chart
+   card fighting for room and made some answers wrap oddly narrow. */
 .block-container {
     padding-top: 2.2rem;
     padding-bottom: 7rem;
-    max-width: 48rem;
+    max-width: 62rem;
 }
 
 header[data-testid="stHeader"] { background: transparent; height: 0; }
+
+/* Belt-and-suspenders text wrapping inside chat bubbles - a long unbroken
+   token (a URL, a run-together number) should wrap instead of forcing the
+   bubble wider than its column and leaving a lopsided gutter beside it. */
+[data-testid="stChatMessage"] p,
+[data-testid="stChatMessage"] li {
+    overflow-wrap: anywhere;
+    word-break: normal;
+}
 
 .masthead {
     border-bottom: 1px solid var(--line);
@@ -747,7 +805,8 @@ header[data-testid="stHeader"] { background: transparent; height: 0; }
     margin-bottom: 1.6rem;
 }
 .masthead h1 {
-    font-family: 'Newsreader', Georgia, serif;
+    font-family: 'Nunito', sans-serif;
+    font-weight: 800;
     font-size: 2.1rem;
     font-weight: 500;
     letter-spacing: -0.015em;
@@ -868,7 +927,8 @@ div[data-testid="stButton"] > button:hover {
     font-weight: 600;
 }
 [data-testid="stSidebar"] .sb-brand {
-    font-family: 'Newsreader', Georgia, serif;
+    font-family: 'Nunito', sans-serif;
+    font-weight: 800;
     font-size: 1.15rem;
     color: var(--ink);
     margin-bottom: 0.15rem;
@@ -902,28 +962,90 @@ div[class*="st-key-chart-"] {
     margin-top: 0.5rem;
 }
 
-/* -------------------------------------------------------------- metric tiles */
+/* ---------------------------------------------------- fundamental-ratio tiles */
+/* Deliberately smaller and in a different color (yellow) than the price card
+   below - these are the numbers a research-minded visitor wants, not the
+   first thing a casual visitor is scanning for. */
 div[class*="st-key-metrics-"] {
     background: var(--surface);
     border: 1px solid var(--line);
-    border-radius: 14px;
-    padding: 0.9rem 1rem 0.3rem;
+    border-radius: 12px;
+    padding: 0.6rem 0.7rem 0.15rem;
     margin-bottom: 0.9rem;
 }
 /* st.metric's own testids - best-effort refinement. The card styling above
    is the guaranteed baseline; these just tint it to match the brand if the
    testids match (harmless no-op otherwise). */
 div[class*="st-key-metrics-"] [data-testid="stMetric"] {
-    background: var(--accent-dim);
-    border-radius: 10px;
-    padding: 0.6rem 0.8rem;
+    background: var(--yellow-dim);
+    border: 1px solid var(--yellow-line);
+    border-radius: 8px;
+    padding: 0.4rem 0.55rem;
 }
 div[class*="st-key-metrics-"] [data-testid="stMetricLabel"] {
-    font-size: 0.72rem;
-    color: var(--ink-soft);
+    font-size: 0.66rem;
+    color: var(--yellow-ink);
+    opacity: 0.85;
 }
 div[class*="st-key-metrics-"] [data-testid="stMetricValue"] {
-    font-size: 1.25rem;
+    font-size: 1rem;
+    color: var(--yellow-ink);
+}
+
+/* -------------------------------------------------------------------- price card */
+.price-card {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    padding: 1.1rem 1.3rem;
+    margin-bottom: 0.9rem;
+}
+.price-hero {
+    display: flex;
+    align-items: baseline;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+}
+.price-hero-value {
+    font-family: 'Nunito', sans-serif;
+    font-weight: 800;
+    font-size: 2.3rem;
+    color: var(--ink);
+    line-height: 1.1;
+}
+.price-pill {
+    font-size: 0.85rem;
+    font-weight: 700;
+    padding: 0.2rem 0.65rem;
+    border-radius: 999px;
+    white-space: nowrap;
+}
+.price-pill.up   { background: var(--up-dim);   color: var(--up); }
+.price-pill.down { background: var(--down-dim); color: var(--down); }
+.price-hero-sub {
+    font-size: 0.85rem;
+    color: var(--ink-faint);
+    margin-top: 0.15rem;
+}
+.price-detail-grid {
+    display: flex;
+    gap: 1.6rem;
+    flex-wrap: wrap;
+    margin-top: 0.9rem;
+    padding-top: 0.8rem;
+    border-top: 1px solid var(--line);
+}
+.price-detail {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+}
+.price-detail span {
+    font-size: 0.72rem;
+    color: var(--ink-faint);
+}
+.price-detail b {
+    font-size: 0.95rem;
     color: var(--ink);
 }
 
@@ -944,6 +1066,50 @@ div[class*="st-key-metrics-"] [data-testid="stMetricValue"] {
     background: #FDECEC;
     border: 1px solid #F3B9B9;
     color: #7A1F1F;
+}
+
+/* ---------------------------------------------------------------- indices strip */
+.indices-strip {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 0.7rem;
+    margin: 1.4rem 0 0.4rem;
+}
+.index-tile {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 0.7rem 0.8rem 0.5rem;
+}
+.index-tile-top {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+.index-tile-symbol {
+    font-weight: 700;
+    font-size: 0.85rem;
+    color: var(--ink);
+}
+.index-tile-pct {
+    font-size: 0.78rem;
+    font-weight: 700;
+}
+.index-tile-pct.up   { color: var(--up); }
+.index-tile-pct.down { color: var(--down); }
+.index-tile-label {
+    font-size: 0.68rem;
+    color: var(--ink-faint);
+    margin-bottom: 0.3rem;
+}
+.sparkline {
+    display: block;
+    width: 100%;
+    height: 24px;
+}
+
+@media (max-width: 640px) {
+    .indices-strip { grid-template-columns: repeat(2, 1fr); }
 }
 </style>
 """
@@ -981,6 +1147,135 @@ def _alert_html(kind: str, message: str) -> str:
     of Streamlit's generic yellow/red alert boxes. kind is 'warn' or 'error'."""
     icon = "⚠" if kind == "warn" else "✕"
     return f'<div class="alert-card {kind}">{icon} {message}</div>'
+
+
+_INDEX_TICKERS = [
+    ("SPY", "S&P 500"), ("QQQ", "Nasdaq 100"), ("DIA", "Dow Jones"), ("IWM", "Russell 2000"),
+]
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _fetch_index_snapshots() -> list[dict]:
+    """A small, 5-minute-cached snapshot of 4 major index ETFs for the empty-
+    state strip - a quick 'the market today' glance before anyone's asked a
+    question. Cached because this would otherwise re-fetch on every page
+    load; 5 minutes is plenty fresh for decorative context, not an analysis
+    input the way get_market_snapshot's live quote is.
+    """
+    out = []
+    for symbol, label in _INDEX_TICKERS:
+        try:
+            t = yf.Ticker(symbol)
+            fi = t.fast_info
+            hist = t.history(period="1d", interval="15m")
+            closes = [c for c in hist["Close"].tolist() if c is not None]
+            price = fi.get("lastPrice") or (closes[-1] if closes else None)
+            prev = fi.get("previousClose")
+            if price is None or not prev:
+                continue
+            out.append({
+                "symbol": symbol,
+                "label": label,
+                "change_pct": (price - prev) / prev * 100,
+                "sparkline": closes,
+            })
+        except Exception:
+            continue  # one index failing shouldn't blank the whole strip
+    return out
+
+
+def _sparkline_svg(values: list[float], up: bool) -> str:
+    """A minimal inline SVG sparkline - the stat-tile spec's optional 'trend'
+    component: shape, not exact values. No axes, labels, or hover - this is
+    decorative market context, not a chart meant to be read precisely."""
+    if len(values) < 2:
+        return ""
+    w, h, pad = 100, 28, 2
+    lo, hi = min(values), max(values)
+    span = (hi - lo) or 1
+    step = (w - 2 * pad) / (len(values) - 1)
+    points = " ".join(
+        f"{pad + i * step:.1f},{pad + (1 - (v - lo) / span) * (h - 2 * pad):.1f}"
+        for i, v in enumerate(values)
+    )
+    color = "var(--up)" if up else "var(--down)"
+    return (
+        f'<svg viewBox="0 0 {w} {h}" class="sparkline" preserveAspectRatio="none">'
+        f'<polyline points="{points}" fill="none" stroke="{color}" '
+        f'stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>'
+    )
+
+
+def _indices_strip_html() -> str:
+    """The empty-state 'market today' strip - 4 small tiles (one per major
+    index ETF) with a percent change and a sparkline. Returns "" if the fetch
+    failed entirely (e.g. no network at import time) - the empty state still
+    works fine without it, this is a decorative addition, not load-bearing.
+    """
+    snapshots = _fetch_index_snapshots()
+    if not snapshots:
+        return ""
+    tiles = []
+    for s in snapshots:
+        up = s["change_pct"] >= 0
+        pct_text = f"{'+' if up else ''}{s['change_pct']:.2f}%"
+        tiles.append(f"""
+        <div class="index-tile">
+            <div class="index-tile-top">
+                <span class="index-tile-symbol">{s['symbol']}</span>
+                <span class="index-tile-pct {'up' if up else 'down'}">{pct_text}</span>
+            </div>
+            <div class="index-tile-label">{s['label']}</div>
+            {_sparkline_svg(s['sparkline'], up)}
+        </div>
+        """)
+    return f'<div class="indices-strip">{"".join(tiles)}</div>'
+
+
+def _price_tiles_html(snapshot: dict) -> str:
+    """The 'what users actually open the app for' block: a big Google/Nasdaq-
+    style price display with a colored change pill, plus a small row of
+    supporting stats (day range, market cap, previous close). Rendered as
+    custom HTML rather than st.metric, specifically so the headline price can
+    be given the large, bold treatment real stock-quote UIs use - something
+    st.metric's fixed sizing can't do without depending on unverified
+    internal testids.
+    """
+    price = snapshot["price"]
+    change = snapshot.get("change")
+    pct = snapshot.get("change_pct")
+    up = (change or 0) >= 0
+    arrow = "▲" if up else "▼"
+    pill_class = "up" if up else "down"
+    pct_text = f"{arrow} {abs(pct):.2f}%" if pct is not None else "—"
+    change_text = f"{'+' if up else ''}{change:,.2f} today" if change is not None else ""
+
+    cap = snapshot.get("market_cap_millions")
+    if cap is None:
+        cap_text = "—"
+    elif cap >= 1000:
+        cap_text = f"${cap / 1000:,.1f}B"
+    else:
+        cap_text = f"${cap:,.0f}M"
+
+    lo, hi = snapshot.get("day_low"), snapshot.get("day_high")
+    range_text = f"${lo:,.2f} – ${hi:,.2f}" if lo is not None and hi is not None else "—"
+    prev_text = f"${snapshot['previous_close']:,.2f}" if snapshot.get("previous_close") is not None else "—"
+
+    return f"""
+    <div class="price-card">
+        <div class="price-hero">
+            <span class="price-hero-value">${price:,.2f}</span>
+            <span class="price-pill {pill_class}">{pct_text}</span>
+        </div>
+        <div class="price-hero-sub">{change_text}</div>
+        <div class="price-detail-grid">
+            <div class="price-detail"><span>Day range</span><b>{range_text}</b></div>
+            <div class="price-detail"><span>Market cap</span><b>{cap_text}</b></div>
+            <div class="price-detail"><span>Previous close</span><b>{prev_text}</b></div>
+        </div>
+    </div>
+    """
 
 
 def _render_metric_tiles(metrics: dict, key: str) -> None:
@@ -1176,6 +1471,11 @@ def main() -> None:
                     st.session_state["pending"] = text
                     st.rerun()
 
+        indices_html = _indices_strip_html()
+        if indices_html:
+            st.markdown('<div class="prompt-head">Market today</div>', unsafe_allow_html=True)
+            st.markdown(indices_html, unsafe_allow_html=True)
+
     for i, message in enumerate(st.session_state["messages"]):
         # Derived from the role, never read back from the stored message - a
         # session from before an avatar change would otherwise replay a stale value.
@@ -1183,6 +1483,8 @@ def main() -> None:
         with st.chat_message(message["role"], avatar=avatar):
             # Tiles above the narrative, matching the live-turn order - i makes
             # each replayed message's container keys unique across the app run.
+            if message.get("snapshot"):
+                st.markdown(_price_tiles_html(message["snapshot"]), unsafe_allow_html=True)
             if message.get("metrics"):
                 _render_metric_tiles(message["metrics"], key=f"metrics-hist-{i}")
             st.markdown(message["content"])
@@ -1202,22 +1504,25 @@ def main() -> None:
 
         with st.chat_message("assistant", avatar=avatar_ai):
             status = st.status("Reading the question…", expanded=True)
-            # Reserved in this order so metric tiles land ABOVE the streaming
-            # text regardless of when mid-stream the tool result actually
-            # arrives - st.empty() claims its visual position immediately,
-            # before either slot has anything to show yet.
+            # Reserved in this order so, top to bottom: price card, then the
+            # smaller fundamental-ratio tiles, then the streaming text - all
+            # regardless of when mid-stream each tool result actually arrives.
+            # st.empty() claims its visual position immediately, before any
+            # slot has something to show yet.
+            snapshot_slot = st.empty()
             metrics_slot = st.empty()
             answer_slot = st.empty()  # live-updated as text streams in below
             used: list[str] = []
             tried_models: list[str] = []
             answer = ""
             streamed = ""  # accumulates chunk-by-chunk for the typing effect
-            # First ticker/metrics looked up via a company-specific tool this
-            # turn - only the first, same simplification as the chart: a
-            # comparison question calls get_company_financials twice, and one
-            # tile row is shown, not two.
+            # First ticker/metrics/snapshot looked up via a company-specific
+            # tool this turn - only the first, same simplification as the
+            # chart: a comparison question calls these tools twice, and one
+            # row of each is shown, not two.
             queried_ticker = None
             queried_metrics = None
+            queried_snapshot = None
 
             try:
                 for kind, payload in stream_answer(agents, question):
@@ -1256,6 +1561,12 @@ def main() -> None:
                                 _render_metric_tiles(
                                     queried_metrics, key=f"metrics-{uuid.uuid4().hex[:8]}"
                                 )
+                    elif kind == "snapshot":
+                        if queried_snapshot is None:
+                            queried_snapshot = payload
+                            snapshot_slot.markdown(
+                                _price_tiles_html(queried_snapshot), unsafe_allow_html=True
+                            )
                     elif kind == "chunk":
                         streamed += payload
                         answer_slot.markdown(streamed + "▌")
@@ -1281,6 +1592,7 @@ def main() -> None:
                     {
                         "role": "assistant", "content": answer, "tools": used,
                         "ticker": queried_ticker, "metrics": queried_metrics,
+                        "snapshot": queried_snapshot,
                     }
                 )
 
