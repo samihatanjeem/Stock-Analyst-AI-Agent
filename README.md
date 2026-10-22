@@ -15,6 +15,7 @@ It will not tell you to buy or sell anything. It has strong opinions about debt 
 ## Why it exists
 
 I ran an OLS regression for my BUSA521 Masters Capstone Project, using live data from the U.S. Securities and Exchange Commission (SEC) 279 firm-year observations, 182 U.S. public companies, predicting next-year ROA from seven financial ratios. A fitted model sitting in a `.csv` is not a very interesting thing to show anyone. An agent that applies that same model to whatever company you're actually curious about *today*, while being upfront about exactly how far outside its training data that company sits, is a much better demo of the same statistics.
+<img width="608" height="341" alt="image" src="https://github.com/user-attachments/assets/8ea1402c-1a82-4c51-bcb9-d02d1c62c1c5" />
 
 ## How it's built
 
